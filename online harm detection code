@@ -1,0 +1,103 @@
+import socket
+import threading
+from scapy.all import srp, Ether, ARP
+import nmap
+
+#creating lock object for the threads to prevent multiple 
+# threads from accessing the same resource at the same time.
+ping_lock = threading.Lock()
+nmap_lock = threading.Lock()
+tcp_scan_lock = threading.Lock()
+
+#checks if a host is active by sending an ARP request using Scapy.
+def is_host_active(network_prefix, host_ip, all_active_hosts):
+    packet = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=network_prefix + "." + str(host_ip))
+    result = srp(packet, timeout=2, verbose=0)[0]     # sends packet and waits for a response for 2 seconds
+    if result:                         #If response received, 
+        with ping_lock:                #the IP add. of the host is added to the list of active hosts.
+            all_active_hosts.append(result[0][1].src)
+
+
+#scans a host for its operating system using the nmap library.
+def find_os(host, all_os):
+    nm = nmap.PortScanner()    #creates a nmap PortScanner object.
+    nm.scan(hosts=host, arguments='-O')   #scans the host for its os
+    try:
+        if 'osclass' in nm[host]:       #checks if os info is available in scan results.
+            best_os_guess = nm[host]['osclass'][0]['osfamily']     #extracts the best guess
+            with nmap_lock:
+                all_os[host] = best_os_guess         #adds the info to the dictionary
+        else:
+            with nmap_lock:
+                all_os[host] = "Unknown"
+    except KeyError:
+        with nmap_lock:
+            all_os[host] = "Unknown"
+
+# scans a host for open ports using the socket module.
+def tcp_scan(host, all_open_ports):
+    open_ports = []
+    for port in range(1, 10000):
+        try:
+            print("Looking at " + host + " for port " + str(port))
+            tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # creates object.
+            tcp_socket.connect((host, port))     #connect to the host on the specified port.
+            open_ports.append(port)    #add port no. to list of open ports 
+            tcp_socket.close()
+        except Exception:
+            pass
+    with tcp_scan_lock:      #add list of open ports to the dictionary 
+        all_open_ports[host] = open_ports
+
+# Find my IP address.
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.connect(("8.8.8.8", 80))   #connect to the Google DNS server on port 80.
+my_ip_address = s.getsockname()[0]    # get the IP address of the local machine.
+print("My IP address: " + my_ip_address)
+s.close()
+
+print("Starting scan...")
+ip_split = my_ip_address.split('.')   #splits the IP address into four parts.
+network_prefix = ip_split[0] + '.' + ip_split[1] + '.' + ip_split[2]
+
+# Find all hosts in the network using Scapy
+all_active_hosts = []     #create an empty list to store the IP addresses
+all_ping_threads = []
+for host_ip in range(1, 255):
+    # create a ping thread for each host IP address.
+    ping_thread = threading.Thread(target=is_host_active, args=(network_prefix, host_ip, all_active_hosts))
+    ping_thread.start()
+    all_ping_threads.append(ping_thread)  #add ping thread to list
+for thread in all_ping_threads:
+    thread.join()       #wait for all ping threads to finish.
+all_active_hosts.sort()
+
+# Find open ports in these active hosts
+all_host_open_ports = {}
+all_tcp_threads = []
+for host in all_active_hosts:  # iterates over list of all active hosts.
+    # creates a TCP scan thread for each active host.
+    tcp_thread = threading.Thread(target=tcp_scan, args=(host, all_host_open_ports))
+    tcp_thread.start()
+    all_tcp_threads.append(tcp_thread)
+for thread in all_tcp_threads:
+    thread.join()
+
+# Find OS device is running using python-nmap
+all_host_os = {}   #create empty dict. to store OS of all active hosts.
+all_nmap_threads = []   #empty list to store all nmap threads.
+for host in all_active_hosts:
+    #creates nmap thread for each active host.
+    nmap_thread = threading.Thread(target=find_os, args=(host, all_host_os))
+    nmap_thread.start()
+    all_nmap_threads.append(nmap_thread)
+for thread in all_nmap_threads:
+    thread.join()
+
+print("Scan complete, Stats below:")
+for host in all_active_hosts:
+    #gets OS info for the host from the dict. of all os
+    os_info = all_host_os.get(host, "Unknown")
+    #get list of open ports for the host from the dict. of all open ports.
+    open_ports = all_host_open_ports.get(host, [])
+    print("Address: {0} OS: {1} Open ports: {2}".format(host, os_info, open_ports))
